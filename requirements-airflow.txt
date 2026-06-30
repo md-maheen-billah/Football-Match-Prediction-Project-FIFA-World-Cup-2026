@@ -1,0 +1,11 @@
+# Install this separately from requirements.txt.
+# Airflow is intentionally not part of the normal project dependencies.
+#
+# Recommended:
+#   python -m venv .airflow-venv
+#   source .airflow-venv/bin/activate
+#   pip install -r requirements-airflow.txt
+#
+# If dependency resolution is unstable, install Apache Airflow with the
+# official constraints file for your Python version.
+apache-airflow==3.2.2

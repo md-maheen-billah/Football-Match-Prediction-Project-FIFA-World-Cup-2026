@@ -16,7 +16,9 @@ Performance notes:
 
 import pickle
 import random
+import argparse
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +31,7 @@ MODEL_DIR = Path(__file__).parent
 BASE_DIR = MODEL_DIR.parents[1]
 DATA_PROCESSED = BASE_DIR / "data" / "processed"
 DATA_RAW = BASE_DIR / "data" / "raw"
+SIMULATION_RUNS_DIR = MODEL_DIR / "simulation_runs"
 
 # ---------------------------------------------------------------------------
 # Feature columns — must match eval_model_training.py
@@ -44,6 +47,14 @@ FEATURE_COLS = [
 ]
 
 RESULTS_NAME_MAP = {"Czech Republic": "Czechia"}
+LIVE_RESULTS_NAME_MAP = {
+    "USA": "United States",
+    "United States": "United States",
+    "Türkiye": "Turkey",
+    "Turkey": "Turkey",
+    "Czech Republic": "Czechia",
+    "Congo DR": "DR Congo",
+}
 
 DEFAULT_FORM = {
     "wins": 2, "draws": 1, "losses": 2,
@@ -54,18 +65,23 @@ DEFAULT_FORM = {
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
-def load_all():
-    with open(MODEL_DIR / "model.pkl", "rb") as f:
+def load_all(model_path=MODEL_DIR / "model.pkl", encoder_path=MODEL_DIR / "label_encoder.pkl"):
+    with open(model_path, "rb") as f:
         model = pickle.load(f)
-    with open(MODEL_DIR / "label_encoder.pkl", "rb") as f:
+    with open(encoder_path, "rb") as f:
         le = pickle.load(f)
 
     upcoming = pd.read_csv(DATA_PROCESSED / "upcoming_match_features.csv", parse_dates=["date"])
     elo_df = pd.read_csv(DATA_PROCESSED / "elo_latest.csv")
     form_df = pd.read_csv(DATA_PROCESSED / "team_recent_form.csv")
     results_raw = pd.read_csv(DATA_RAW / "results.csv", parse_dates=["date"])
+    live_results_path = DATA_PROCESSED / "worldcup_2026_live_results.csv"
+    if live_results_path.exists():
+        live_results = pd.read_csv(live_results_path, parse_dates=["date"])
+    else:
+        live_results = pd.DataFrame()
 
-    return model, le, upcoming, elo_df, form_df, results_raw
+    return model, le, upcoming, elo_df, form_df, results_raw, live_results
 
 
 def build_elo_lookup(elo_df):
@@ -87,8 +103,46 @@ def build_form_lookup(form_df):
     return lookup
 
 
-def build_actual_results(results_raw):
+def normalize_live_team_name(team):
+    return LIVE_RESULTS_NAME_MAP.get(team, team)
+
+
+def add_result_to_lookup(lookup, home_team, away_team, home_score, away_score):
+    if pd.isna(home_team) or pd.isna(away_team):
+        return
+    if pd.isna(home_score) or pd.isna(away_score):
+        return
+
+    home = normalize_live_team_name(home_team)
+    away = normalize_live_team_name(away_team)
+    hs = int(home_score)
+    as_ = int(away_score)
+    result = "H" if hs > as_ else ("A" if hs < as_ else "D")
+    lookup[(home, away)] = result
+
+
+def build_actual_results(results_raw, live_results):
     """Confirmed WC 2026 results keyed by (team1_norm, team2_norm) → 'H'/'D'/'A'."""
+    lookup = {}
+
+    if not live_results.empty:
+        live = live_results[
+            live_results.get("is_finished", False)
+            & live_results["home_score"].notna()
+            & live_results["away_score"].notna()
+        ].copy()
+        for _, row in live.iterrows():
+            add_result_to_lookup(
+                lookup,
+                row["home_team"],
+                row["away_team"],
+                row["home_score"],
+                row["away_score"],
+            )
+
+    if lookup:
+        return lookup
+
     wc = results_raw[
         (results_raw["date"].dt.year == 2026)
         & results_raw["tournament"].str.contains("FIFA World Cup", na=False)
@@ -97,11 +151,14 @@ def build_actual_results(results_raw):
     wc["home_team"] = wc["home_team"].replace(RESULTS_NAME_MAP)
     wc["away_team"] = wc["away_team"].replace(RESULTS_NAME_MAP)
 
-    lookup = {}
     for _, row in wc.iterrows():
-        hs, as_ = row["home_score"], row["away_score"]
-        result = "H" if hs > as_ else ("A" if hs < as_ else "D")
-        lookup[(row["home_team"], row["away_team"])] = result
+        add_result_to_lookup(
+            lookup,
+            row["home_team"],
+            row["away_team"],
+            row["home_score"],
+            row["away_score"],
+        )
     return lookup
 
 
@@ -301,22 +358,19 @@ def simulate_ko_match(team1, team2, ko_prob_cache, model, le, elo_lookup, form_l
 
 def simulate_knockout_bracket(r32_matchups, ko_prob_cache, model, le, elo_lookup, form_lookup, reach):
     current_round = r32_matchups
-    stages = ["r32", "r16", "qf", "sf"]
+    next_stage_keys = ["r16", "quarter", "semi", "final"]
 
-    for stage in stages:
+    for next_stage_key in next_stage_keys:
         next_round = []
         for t1, t2 in current_round:
             winner = simulate_ko_match(t1, t2, ko_prob_cache, model, le, elo_lookup, form_lookup)
-            reach[winner][stage] += 1
+            reach[winner][next_stage_key] += 1
             next_round.append(winner)
         current_round = list(zip(next_round[::2], next_round[1::2]))
 
     assert len(current_round) == 1
     t1, t2 = current_round[0]
     champion = simulate_ko_match(t1, t2, ko_prob_cache, model, le, elo_lookup, form_lookup)
-    finalist = t2 if champion == t1 else t1
-    reach[champion]["final"] += 1
-    reach[finalist]["final"] += 1
     reach[champion]["winner"] += 1
     return champion
 
@@ -339,13 +393,58 @@ def simulate_one_tournament(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def run(n_simulations=10_000):
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=MODEL_DIR / "model.pkl",
+        help="Model pickle to use for simulation.",
+    )
+    parser.add_argument(
+        "--encoder-path",
+        type=Path,
+        default=MODEL_DIR / "label_encoder.pkl",
+        help="Label encoder pickle to use for simulation.",
+    )
+    parser.add_argument(
+        "--artifact-label",
+        default="baseline",
+        help="Label added to the versioned simulation file.",
+    )
+    parser.add_argument(
+        "--n-simulations",
+        type=int,
+        default=10_000,
+        help="Number of Monte Carlo simulations to run.",
+    )
+    parser.add_argument(
+        "--update-latest",
+        action="store_true",
+        help="Also update src/modeling/simulation_results.csv.",
+    )
+    return parser.parse_args()
+
+
+def run(
+    n_simulations=10_000,
+    model_path=MODEL_DIR / "model.pkl",
+    encoder_path=MODEL_DIR / "label_encoder.pkl",
+    artifact_label="baseline",
+    update_latest=False,
+):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = f"{artifact_label}_{timestamp}"
     print("Loading data and model...")
-    model, le, upcoming, elo_df, form_df, results_raw = load_all()
+    model, le, upcoming, elo_df, form_df, results_raw, live_results = load_all(
+        model_path,
+        encoder_path,
+    )
 
     elo_lookup = build_elo_lookup(elo_df)
     form_lookup = build_form_lookup(form_df)
-    actual_results = build_actual_results(results_raw)
+    actual_results = build_actual_results(results_raw, live_results)
+    print(f"Loaded {len(actual_results)} confirmed World Cup results.")
     groups, schedule = build_group_stage_data(upcoming)
 
     print("Precomputing group stage probabilities...")
@@ -372,8 +471,8 @@ def run(n_simulations=10_000):
             "group": next(g for g, teams in groups.items() if team in teams),
             "win_pct": round(champions[team] / n_simulations * 100, 2),
             "final_pct": round(r["final"] / n_simulations * 100, 2),
-            "semi_pct": round(r["sf"] / n_simulations * 100, 2),
-            "quarter_pct": round(r["qf"] / n_simulations * 100, 2),
+            "semi_pct": round(r["semi"] / n_simulations * 100, 2),
+            "quarter_pct": round(r["quarter"] / n_simulations * 100, 2),
             "r16_pct": round(r["r16"] / n_simulations * 100, 2),
             "r32_pct": round(r["r32"] / n_simulations * 100, 2),
             "wins": champions[team],
@@ -382,9 +481,22 @@ def run(n_simulations=10_000):
     df = pd.DataFrame(rows).sort_values("win_pct", ascending=False).reset_index(drop=True)
     df.index += 1
 
-    out_path = MODEL_DIR / "simulation_results.csv"
-    df.to_csv(out_path)
-    print(f"\nSaved to {out_path}\n")
+    SIMULATION_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    latest_path = MODEL_DIR / "simulation_results.csv"
+    versioned_path = SIMULATION_RUNS_DIR / f"simulation_results_{run_id}.csv"
+
+    if update_latest and latest_path.exists():
+        previous_latest_path = SIMULATION_RUNS_DIR / f"previous_latest_simulation_results_{run_id}.csv"
+        previous_latest_path.write_bytes(latest_path.read_bytes())
+        print(f"\nBacked up previous latest results to {previous_latest_path}")
+
+    df.to_csv(versioned_path)
+    print(f"\nSaved versioned results to {versioned_path}")
+    if update_latest:
+        df.to_csv(latest_path)
+        print(f"Updated latest results at {latest_path}\n")
+    else:
+        print("Latest simulation_results.csv was not updated.\n")
 
     pd.set_option("display.max_rows", None)
     pd.set_option("display.width", 120)
@@ -399,4 +511,11 @@ def run(n_simulations=10_000):
 
 
 if __name__ == "__main__":
-    run(n_simulations=10_000)
+    args = parse_args()
+    run(
+        n_simulations=args.n_simulations,
+        model_path=args.model_path,
+        encoder_path=args.encoder_path,
+        artifact_label=args.artifact_label,
+        update_latest=args.update_latest,
+    )

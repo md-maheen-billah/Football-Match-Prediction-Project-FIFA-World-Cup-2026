@@ -33,8 +33,8 @@ def summarize_last_matches(last_matches):
     }
 
 
-def build_training_dataset():
-    matches = pd.read_csv(INPUT_PATH)
+def build_training_dataset(input_path=INPUT_PATH, output_path=OUTPUT_PATH):
+    matches = pd.read_csv(input_path)
 
     matches["date"] = pd.to_datetime(matches["date"])
     matches = matches.sort_values("date").reset_index(drop=True)
@@ -110,10 +110,10 @@ def build_training_dataset():
 
     training = pd.DataFrame(rows)
 
-    training.to_csv(OUTPUT_PATH, index=False)
+    training.to_csv(output_path, index=False)
 
     print("Training dataset shape:", training.shape)
-    print(f"Saved to: {OUTPUT_PATH}")
+    print(f"Saved to: {output_path}")
 
     print("\nColumns:")
     print(training.columns.tolist())

@@ -1,0 +1,16 @@
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+xgboost>=2.0
+
+streamlit>=1.36
+plotly>=5.22
+
+requests>=2.32
+beautifulsoup4>=4.12
+lxml>=5.2
+schedule>=1.2
+
+matplotlib>=3.8
+seaborn>=0.13
+notebook>=7.2

@@ -14,8 +14,8 @@ NAME_MAP = {
 CUTOFF_YEAR = 1970
 
 
-def load_data():
-    matches = pd.read_csv(PROCESSED_DIR / "training_dataset.csv", parse_dates=["date"])
+def load_data(training_dataset_path=PROCESSED_DIR / "training_dataset.csv"):
+    matches = pd.read_csv(training_dataset_path, parse_dates=["date"])
     elo = pd.read_csv(RAW_DIR / "elo_ratings_wc2026.csv")
     return matches, elo
 
@@ -58,8 +58,11 @@ def build_features(df):
     return df
 
 
-def main():
-    matches, elo = load_data()
+def prepare_features(
+    training_dataset_path=PROCESSED_DIR / "training_dataset.csv",
+    output_path=OUT_DIR / "training_features.csv",
+):
+    matches, elo = load_data(training_dataset_path)
 
     elo_teams = set(elo["country"].unique())
 
@@ -90,12 +93,15 @@ def main():
 
     out = matches[feature_cols].reset_index(drop=True)
 
-    out_path = OUT_DIR / "training_features.csv"
-    out.to_csv(out_path, index=False)
+    out.to_csv(output_path, index=False)
 
-    print(f"Saved {len(out)} rows to {out_path}")
+    print(f"Saved {len(out)} rows to {output_path}")
     print(f"Target distribution:\n{out['target'].value_counts()}")
     print(f"\nFeature sample:\n{out.head(3).to_string()}")
+
+
+def main():
+    prepare_features()
 
 
 if __name__ == "__main__":
