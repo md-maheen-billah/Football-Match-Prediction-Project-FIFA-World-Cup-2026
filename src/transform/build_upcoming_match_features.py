@@ -27,8 +27,9 @@ def build_upcoming_match_features():
     "Czech Republic": "Czechia"
     })
 
-    # Keep only group-stage matches with real teams
-    fixtures = fixtures[fixtures["stage"] == "Group Stage"].copy()
+    # Keep the full tournament schedule. Knockout placeholders stay in the
+    # output and will have missing team features until the teams are known.
+    fixtures = fixtures.copy()
 
     fixtures["team1_normalized"] = fixtures["team1"].apply(normalize_team_name)
     fixtures["team2_normalized"] = fixtures["team2"].apply(normalize_team_name)
@@ -71,6 +72,8 @@ def build_upcoming_match_features():
     fixtures.to_csv(OUTPUT_PATH, index=False)
 
     print("Final shape:", fixtures.shape)
+    print("\nFixtures by stage:")
+    print(fixtures["stage"].value_counts(dropna=False).to_string())
     print(f"Saved to: {OUTPUT_PATH}")
 
     print("\nMissing values in key feature columns:")

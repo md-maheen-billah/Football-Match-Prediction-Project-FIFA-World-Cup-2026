@@ -1,4 +1,7 @@
+import argparse
+import json
 import pickle
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -10,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 FEATURES_PATH = Path(__file__).parent / "training_features.csv"
 MODEL_PATH = Path(__file__).parent / "model.pkl"
 ENCODER_PATH = Path(__file__).parent / "label_encoder.pkl"
+ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 
 FEATURE_COLS = [
     "home_elo", "away_elo", "elo_diff",
@@ -36,8 +40,8 @@ XGB_PARAMS = dict(
 )
 
 
-def load_data():
-    df = pd.read_csv(FEATURES_PATH, parse_dates=["date"])
+def load_data(features_path=FEATURES_PATH):
+    df = pd.read_csv(features_path, parse_dates=["date"])
     le = LabelEncoder()
     df["label"] = le.fit_transform(df["target"])  # A=0, D=1, H=2
     return df, le
@@ -66,7 +70,13 @@ def evaluate(model, df, le):
     acc = accuracy_score(y_true, y_pred)
     print(f"Accuracy: {acc:.3f}  ({len(df)} samples)")
     print(classification_report(y_true, y_pred, target_names=le.classes_))
-    return acc
+    report = classification_report(
+        y_true,
+        y_pred,
+        target_names=le.classes_,
+        output_dict=True,
+    )
+    return acc, report
 
 
 def feature_importance(model):
@@ -75,10 +85,73 @@ def feature_importance(model):
     ).sort_values(ascending=False)
     print("\nFeature importances:")
     print(importance.to_string())
+    return importance
+
+
+def save_training_artifacts(model, le, metrics, run_id, update_latest=False):
+    run_dir = ARTIFACTS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    versioned_model_path = run_dir / "model.pkl"
+    versioned_encoder_path = run_dir / "label_encoder.pkl"
+    versioned_metrics_path = run_dir / "metrics.json"
+
+    if update_latest and MODEL_PATH.exists():
+        previous_model_path = run_dir / "previous_latest_model.pkl"
+        previous_model_path.write_bytes(MODEL_PATH.read_bytes())
+        print(f"Backed up previous latest model → {previous_model_path}")
+    if update_latest and ENCODER_PATH.exists():
+        previous_encoder_path = run_dir / "previous_latest_label_encoder.pkl"
+        previous_encoder_path.write_bytes(ENCODER_PATH.read_bytes())
+        print(f"Backed up previous latest encoder → {previous_encoder_path}")
+
+    with open(versioned_model_path, "wb") as f:
+        pickle.dump(model, f)
+    with open(versioned_encoder_path, "wb") as f:
+        pickle.dump(le, f)
+    versioned_metrics_path.write_text(json.dumps(metrics, indent=2))
+
+    print(f"Saved versioned model → {versioned_model_path}")
+    print(f"Saved versioned encoder → {versioned_encoder_path}")
+    print(f"Saved versioned metrics → {versioned_metrics_path}")
+
+    if update_latest:
+        with open(MODEL_PATH, "wb") as f:
+            pickle.dump(model, f)
+        with open(ENCODER_PATH, "wb") as f:
+            pickle.dump(le, f)
+        print(f"Updated latest model → {MODEL_PATH}")
+        print(f"Updated latest encoder → {ENCODER_PATH}")
+    else:
+        print("Latest model files were not updated.")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--features-path",
+        type=Path,
+        default=FEATURES_PATH,
+        help="CSV feature file used for training.",
+    )
+    parser.add_argument(
+        "--artifact-label",
+        default="baseline",
+        help="Label added to the versioned training artifact folder.",
+    )
+    parser.add_argument(
+        "--update-latest",
+        action="store_true",
+        help="Also update src/modeling/model.pkl and label_encoder.pkl.",
+    )
+    return parser.parse_args()
 
 
 def main():
-    df, le = load_data()
+    args = parse_args()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = f"{args.artifact_label}_{timestamp}"
+    df, le = load_data(args.features_path)
 
     train_df, test_df = temporal_split(df)
     print(f"Train: {len(train_df)} rows (pre-{EVAL_SPLIT_YEAR})")
@@ -86,23 +159,34 @@ def main():
 
     print("--- Eval model (pre-2018 train / post-2018 test) ---")
     eval_model = train_model(train_df)
-    evaluate(eval_model, test_df, le)
-    feature_importance(eval_model)
+    eval_accuracy, eval_report = evaluate(eval_model, test_df, le)
+    importance = feature_importance(eval_model)
 
     print(f"\n--- Final model (all {len(df)} rows) ---")
     final_model = train_model(df)
     print("Retrained on full dataset.")
 
-    with open(MODEL_PATH, "wb") as f:
-        pickle.dump(final_model, f)
-    with open(ENCODER_PATH, "wb") as f:
-        pickle.dump(le, f)
-    print(f"Saved model → {MODEL_PATH}")
-    print(f"Saved encoder → {ENCODER_PATH}")
-
     # Sanity check: in-sample accuracy on full data
     print("\nIn-sample accuracy (not meaningful for eval, just a sanity check):")
-    evaluate(final_model, df, le)
+    in_sample_accuracy, in_sample_report = evaluate(final_model, df, le)
+
+    metrics = {
+        "run_id": run_id,
+        "features_path": str(args.features_path),
+        "artifact_label": args.artifact_label,
+        "training_rows": len(df),
+        "temporal_split_year": EVAL_SPLIT_YEAR,
+        "train_rows": len(train_df),
+        "test_rows": len(test_df),
+        "eval_accuracy": eval_accuracy,
+        "in_sample_accuracy": in_sample_accuracy,
+        "eval_report": eval_report,
+        "in_sample_report": in_sample_report,
+        "feature_importance": importance.to_dict(),
+        "feature_columns": FEATURE_COLS,
+        "xgb_params": XGB_PARAMS,
+    }
+    save_training_artifacts(final_model, le, metrics, run_id, args.update_latest)
 
 
 if __name__ == "__main__":
